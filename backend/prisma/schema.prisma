@@ -1,0 +1,75 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(uuid())
+  walletAddress String   @unique
+  email         String?
+  name          String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  agents        Agent[]
+  listings      Listing[]
+  transactions  Transaction[]
+}
+
+model Agent {
+  id          String   @id @default(uuid())
+  tokenId     Int?     @unique
+  name        String
+  description String   @db.Text
+  price       Float
+  category    String?
+  imageUrl    String?
+  metadata    Json?
+  
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id])
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  listings    Listing[]
+  transactions Transaction[]
+}
+
+model Listing {
+  id        String   @id @default(uuid())
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id])
+  price     Float
+  status    String   @default("active") // active, sold, cancelled
+  sellerId  String
+  seller    User     @relation(fields: [sellerId], references: [id])
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Transaction {
+  id            String   @id @default(uuid())
+  agentId       String
+  agent         Agent    @relation(fields: [agentId], references: [id])
+  buyerId       String
+  buyer         User     @relation("BuyerTransactions", fields: [buyerId], references: [id])
+  sellerId      String
+  seller        User     @relation("SellerTransactions", fields: [sellerId], references: [id])
+  amount        Float
+  txHash        String?  @unique
+  status        String   @default("pending") // pending, completed, failed
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+

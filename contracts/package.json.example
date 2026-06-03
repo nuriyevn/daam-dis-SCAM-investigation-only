@@ -1,0 +1,23 @@
+{
+  "name": "ai-agent-marketplace-contracts",
+  "version": "1.0.0",
+  "description": "Smart contracts for AI Agent Marketplace",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@openzeppelin/contracts": "^5.0.1",
+    "hardhat": "^2.19.4"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
+  }
+}
