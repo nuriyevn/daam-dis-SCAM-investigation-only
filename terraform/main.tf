@@ -221,9 +221,7 @@ resource "aws_instance" "daam" {
 
     rm -rf /home/ec2-user/daam
 
-    sudo -u ec2-user git clone \
-        git@github.com:nuriyevn/daam-dis.git \
-        /home/ec2-user/daam
+    sudo -u ec2-user git clone --branch codebase --single-branch git@github.com:nuriyevn/daam-dis.git /home/ec2-user/daam
 
     # --------------------------------------------------------
     # Install application dependencies / create .env
