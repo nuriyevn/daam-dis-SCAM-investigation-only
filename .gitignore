@@ -1,8 +1,10 @@
 node_modules/
 .terraform/
-daam-dis.pem
-daam-dis-terraform.pem
-daam-dis.pem.backup
+*.backup
 terraform.tfstate
 terraform.tfstate.backup
 terraform.tfvars
+*.tfvars
+*.tfstate
+*.tfstate.*
+*.pem

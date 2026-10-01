@@ -23,6 +23,12 @@ provider "aws" {
   region = var.aws_region
 }
 
+variable "dev_password" {
+  description = "Password for the DAAM development environment"
+  type        = string
+  sensitive   = true
+}
+
 # ============================================================
 # Latest Amazon Linux 2023 AMI
 # ============================================================
@@ -160,40 +166,52 @@ resource "aws_instance" "daam" {
   user_data = <<-EOF
     #!/bin/bash
 
-    set -eux
+    set -euxo pipefail
 
-    # --------------------------------------------------------
+    exec > >(tee /var/log/daam-bootstrap.log | logger -t daam-bootstrap -s 2>/dev/console) 2>&1
+
+    echo "============================================================"
+    echo "DAAM bootstrap started"
+    echo "============================================================"
+
+    # ----------------------------------------------------------
     # System update
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
 
     dnf update -y
 
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
     # Basic tools
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
 
-    dnf install -y git curl wget jq nginx --allowerasing
+    dnf install -y git curl wget jq nginx policycoreutils-python-utils --allowerasing
 
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
     # Node.js 20
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
 
     dnf install -y nodejs20
 
     alternatives --install /usr/bin/node node /usr/bin/node-20 20 || true
     alternatives --install /usr/bin/npm npm /usr/bin/npm-20 20 || true
 
-    # --------------------------------------------------------
-    # GitHub SSH configuration
-    # --------------------------------------------------------
+    node --version
+    npm --version
+    git --version
+    nginx -v
 
-    mkdir -p /home/ec2-user/.ssh
+    # ----------------------------------------------------------
+    # GitHub SSH configuration
+    # ----------------------------------------------------------
+
+    install -d -m 700 -o ec2-user -g ec2-user /home/ec2-user/.ssh
 
     cat > /home/ec2-user/.ssh/daam_ec2_deploy <<'GITHUB_KEY'
     ${var.github_deploy_key}
     GITHUB_KEY
 
     chmod 600 /home/ec2-user/.ssh/daam_ec2_deploy
+    chown ec2-user:ec2-user /home/ec2-user/.ssh/daam_ec2_deploy
 
     cat > /home/ec2-user/.ssh/config <<'SSH_CONFIG'
     Host github.com
@@ -204,47 +222,232 @@ resource "aws_instance" "daam" {
     SSH_CONFIG
 
     chmod 600 /home/ec2-user/.ssh/config
+    chown ec2-user:ec2-user /home/ec2-user/.ssh/config
 
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
     # GitHub host verification
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
 
     ssh-keyscan github.com > /home/ec2-user/.ssh/known_hosts
 
     chmod 644 /home/ec2-user/.ssh/known_hosts
+    chown ec2-user:ec2-user /home/ec2-user/.ssh/known_hosts
 
-    chown -R ec2-user:ec2-user /home/ec2-user/.ssh
-
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
     # Clone application
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
 
     rm -rf /home/ec2-user/daam
 
-    sudo -u ec2-user git clone --branch codebase --single-branch git@github.com:nuriyevn/daam-dis.git /home/ec2-user/daam
-
-    # --------------------------------------------------------
-    # Install application dependencies / create .env
-    # --------------------------------------------------------
+    sudo -u ec2-user git clone \
+      --branch codebase \
+      --single-branch \
+      git@github.com:nuriyevn/daam-dis.git \
+      /home/ec2-user/daam
 
     cd /home/ec2-user/daam
 
+    sudo -u ec2-user git status
+    sudo -u ec2-user git branch --show-current
+
+    # ----------------------------------------------------------
+    # Install application dependencies / create .env
+    # ----------------------------------------------------------
+
     sudo -u ec2-user npm run setup
 
-    # --------------------------------------------------------
-    # Nginx
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
+    # Build frontend
+    # ----------------------------------------------------------
+
+    sudo -u ec2-user npm run build:frontend
+
+    # ----------------------------------------------------------
+    # Deploy frontend
+    # ----------------------------------------------------------
+
+    rm -rf /var/www/daam
+    mkdir -p /var/www/daam
+
+    cp -r /home/ec2-user/daam/frontend/dist/. /var/www/daam/
+
+    chown -R nginx:nginx /var/www/daam
+
+    find /var/www/daam -type d -exec chmod 755 {} \;
+    find /var/www/daam -type f -exec chmod 644 {} \;
+
+    # ----------------------------------------------------------
+    # SELinux
+    # ----------------------------------------------------------
+
+    if command -v semanage >/dev/null 2>&1; then
+        semanage fcontext -a -t httpd_sys_content_t "/var/www/daam(/.*)?" || true
+        restorecon -Rv /var/www/daam || true
+    fi
+
+    # ----------------------------------------------------------
+    # Backend systemd service
+    # ----------------------------------------------------------
+
+    cat > /etc/systemd/system/daam-backend.service <<'SYSTEMD'
+    [Unit]
+    Description=DAAM AI Agent Marketplace Backend
+    After=network.target
+
+    [Service]
+    Type=simple
+    User=ec2-user
+    WorkingDirectory=/home/ec2-user/daam/backend
+    ExecStart=/usr/bin/node /home/ec2-user/daam/backend/src/server.js
+    Restart=always
+    RestartSec=5
+    Environment=NODE_ENV=production
+
+    [Install]
+    WantedBy=multi-user.target
+    SYSTEMD
+
+    chmod 644 /etc/systemd/system/daam-backend.service
+
+    systemctl daemon-reload
+    systemctl enable daam-backend
+    systemctl restart daam-backend
+
+    # ----------------------------------------------------------
+    # Wait for backend
+    # ----------------------------------------------------------
+
+    for i in $(seq 1 30); do
+        if curl -fsS http://127.0.0.1:3001/health >/dev/null; then
+            echo "DAAM backend is healthy"
+            break
+        fi
+
+        echo "Waiting for DAAM backend..."
+        sleep 2
+    done
+
+    curl -fsS http://127.0.0.1:3001/health
+
+    # ----------------------------------------------------------
+    # Nginx configuration
+    # ----------------------------------------------------------
+
+    rm -f /etc/nginx/conf.d/daam.conf
+
+    cat > /etc/nginx/nginx.conf <<'NGINX'
+    user nginx;
+    worker_processes auto;
+
+    error_log /var/log/nginx/error.log notice;
+    pid /run/nginx.pid;
+
+    include /usr/share/nginx/modules/*.conf;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log /var/log/nginx/access.log main;
+
+        sendfile on;
+        tcp_nopush on;
+        keepalive_timeout 65;
+        types_hash_max_size 4096;
+
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        server {
+            listen 80;
+            listen [::]:80;
+
+            server_name _;
+
+            root /var/www/daam;
+            index index.html;
+
+            # React/Vite SPA
+            location / {
+                try_files $uri $uri/ /index.html;
+            }
+
+            # Backend API
+            location /api/ {
+                proxy_pass http://127.0.0.1:3001;
+                proxy_http_version 1.1;
+
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # Backend health
+            location /health {
+                proxy_pass http://127.0.0.1:3001;
+                proxy_http_version 1.1;
+
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # Never expose hidden files
+            location ~ /\. {
+                deny all;
+            }
+        }
+    }
+    NGINX
+
+    # ----------------------------------------------------------
+    # Validate Nginx configuration
+    # ----------------------------------------------------------
+
+    nginx -t
 
     systemctl enable nginx
-    systemctl start nginx
+    systemctl restart nginx
 
-    # --------------------------------------------------------
-    # Diagnostics
-    # --------------------------------------------------------
+    # ----------------------------------------------------------
+    # Final health checks
+    # ----------------------------------------------------------
 
-    node --version
-    npm --version
-    nginx -v
+    echo "============================================================"
+    echo "DAAM backend status"
+    echo "============================================================"
+
+    systemctl --no-pager --full status daam-backend
+
+    echo "============================================================"
+    echo "DAAM Nginx status"
+    echo "============================================================"
+
+    systemctl --no-pager --full status nginx
+
+    echo "============================================================"
+    echo "Frontend health"
+    echo "============================================================"
+
+    curl -I http://127.0.0.1/
+
+    echo "============================================================"
+    echo "API health"
+    echo "============================================================"
+
+    curl -fsS http://127.0.0.1/health
+
+    echo
+    echo "============================================================"
+    echo "DAAM bootstrap completed successfully"
+    echo "============================================================"
 
   EOF
 
