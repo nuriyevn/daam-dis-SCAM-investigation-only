@@ -172,12 +172,7 @@ resource "aws_instance" "daam" {
     # Basic tools
     # --------------------------------------------------------
 
-    dnf install -y \
-      git \
-      curl \
-      wget \
-      jq \
-      nginx
+    dnf install -y git curl wget jq nginx --allowerasing
 
     # --------------------------------------------------------
     # Node.js 20
@@ -185,39 +180,81 @@ resource "aws_instance" "daam" {
 
     dnf install -y nodejs20
 
-    # Make node/npm available as the standard commands.
     alternatives --install /usr/bin/node node /usr/bin/node-20 20 || true
     alternatives --install /usr/bin/npm npm /usr/bin/npm-20 20 || true
 
     # --------------------------------------------------------
-    # Create application directory
+    # GitHub SSH configuration
     # --------------------------------------------------------
 
-    mkdir -p /home/ec2-user/daam
+    mkdir -p /home/ec2-user/.ssh
 
-    chown -R ec2-user:ec2-user /home/ec2-user/daam
+    cat > /home/ec2-user/.ssh/daam_ec2_deploy <<'GITHUB_KEY'
+    ${var.github_deploy_key}
+    GITHUB_KEY
+
+    chmod 600 /home/ec2-user/.ssh/daam_ec2_deploy
+
+    cat > /home/ec2-user/.ssh/config <<'SSH_CONFIG'
+    Host github.com
+        HostName github.com
+        User git
+        IdentityFile ~/.ssh/daam_ec2_deploy
+        IdentitiesOnly yes
+    SSH_CONFIG
+
+    chmod 600 /home/ec2-user/.ssh/config
 
     # --------------------------------------------------------
-    # Enable nginx
+    # GitHub host verification
+    # --------------------------------------------------------
+
+    ssh-keyscan github.com > /home/ec2-user/.ssh/known_hosts
+
+    chmod 644 /home/ec2-user/.ssh/known_hosts
+
+    chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+
+    # --------------------------------------------------------
+    # Clone application
+    # --------------------------------------------------------
+
+    rm -rf /home/ec2-user/daam
+
+    sudo -u ec2-user git clone \
+        git@github.com:nuriyevn/daam-dis.git \
+        /home/ec2-user/daam
+
+    # --------------------------------------------------------
+    # Install application dependencies / create .env
+    # --------------------------------------------------------
+
+    cd /home/ec2-user/daam
+
+    sudo -u ec2-user npm run setup
+
+    # --------------------------------------------------------
+    # Nginx
     # --------------------------------------------------------
 
     systemctl enable nginx
     systemctl start nginx
 
     # --------------------------------------------------------
-    # Useful version information
+    # Diagnostics
     # --------------------------------------------------------
 
-    node --version || true
-    npm --version || true
+    node --version
+    npm --version
+    nginx -v
 
   EOF
 
   tags = {
-    Name      = "daam-server"
-    Project   = "DAAM"
+    Name        = "daam-server"
+    Project     = "DAAM"
     Environment = "dev"
-    ManagedBy = "terraform"
+    ManagedBy   = "terraform"
   }
 }
 
